@@ -1,318 +1,33 @@
-import sys
-import os
+import simsym
+import symtypes
 import z3
-import types
+import z3printer
+import errno
+import collections
+import itertools
+import sys
+import argparse
+import json
 
-class Symbolic(object):
-    pass
-
-def toz3(val):
-    if isinstance(val, Symbolic):
-        return val._v
-    return val
-
-def strtype(x):
-    if type(x) == types.InstanceType:
-        return x.__class__.__name__
-    else:
-        return type(x).__name__
-
-solver = z3.Solver()
-
-def str_state():
-    asserts = solver.assertions()
-    return str(z3.simplify(z3.And(*asserts)))
-
-# This maintains a type hierarchy that parallels Z3's symbolic type
-# hierarchy.  Each type wraps the equivalent Z3 type and defers to the
-# Z3 methods for all symbolic operations (wrapping the results in the
-# appropriate wrapper type).  However, these types add methods
-# specific to symbolic execution; most notably __nonzero__.
-
-# Monkey-patch __nonzero__ on Z3 types to make sure we don't
-# accidentally call it instead of our wrappers.
-def z3_nonzero(self):
-    raise RuntimeError("Cannot __nonzero__ a %s" % self.__class__)
-z3.ExprRef.__nonzero__ = z3_nonzero
-del z3_nonzero
-
-class MetaZ3Wrapper(type):
-    """Metaclass to generate wrappers for Z3 ref methods.  The class
-    should have a __wrap__ dictionary mapping from (wrapper class
-    name, argument count) pairs to a list of method names to wrap.
-    This will generate all of the named methods, calling the
-    corresponding method on self._v, and wrapping the result using the
-    named wrapper class."""
-
-    def __new__(cls, classname, bases, classdict):
-        if "__wrap__" in classdict:
-            for (wrapper, nargs), methods in classdict.pop("__wrap__").items():
-                for method in methods:
-                    args = ["o%d" % i for i in range(nargs - 1)]
-                    code = "def %s(%s):\n" % (method, ",".join(["self"] + args))
-                    for o in args:
-                        code += " if isinstance(%s, Symbolic): %s=%s._v\n" % \
-                            (o, o, o)
-                    code += " return %s(self._v.%s(%s))" % \
-                        (wrapper or "", method, ",".join(args))
-                    locals_dict = {}
-                    exec code in globals(), locals_dict
-                    classdict[method] = locals_dict[method]
-
-        return type.__new__(cls, classname, bases, classdict)
-
-class SExpr(Symbolic):
-    __metaclass__ = MetaZ3Wrapper
-
-    def __init__(self, ref):
-        if not isinstance(ref, z3.ExprRef):
-            raise TypeError("SExpr expected ExprRef, got %s" % strtype(ref))
-        self._v = ref
-
-    __wrap__ = {("make_sexpr", 2): ["__eq__", "__ne__"],
-                (None, 1): ["__str__", "__repr__"]}
-
-class SArith(SExpr):
-    def __init__(self, ref):
-        if not isinstance(ref, z3.ArithRef):
-            raise TypeError("SArith expected ArithRef, got %s" % strtype(ref))
-        super(SArith, self).__init__(ref)
-
-    __wrap__ = {("make_sexpr", 2):
-                    ["__add__", "__div__", "__mod__", "__mul__", "__pow__",
-                     "__sub__", "__truediv__",
-                     "__radd__", "__rdiv__", "__rmod__", "__rmul__", "__rpow__",
-                     "__rsub__", "__rtruediv__",
-                     "__ge__", "__gt__", "__le__", "__lt__"],
-                ("make_sexpr", 1):
-                    ["__neg__", "__pos__"]}
-
-class SBool(SExpr):
-    def __init__(self, ref):
-        if not isinstance(ref, z3.BoolRef):
-            raise TypeError("SBool expected BoolRef, got %s" % strtype(ref))
-        super(SBool, self).__init__(ref)
-
-    def __nonzero__(self):
-        solver.push()
-        solver.add(self._v)
-        # XXX What about z3.unknown?
-        canTrue = (solver.check() == z3.sat)
-        solver.pop()
-
-        solver.push()
-        solver.add(z3.Not(self._v))
-        canFalse = (solver.check() == z3.sat)
-        solver.pop()
-
-        if canTrue and not canFalse:
-            return True
-        if canFalse and not canTrue:
-            return False
-        if not canTrue and not canFalse:
-            raise RuntimeError("Branch contradiction")
-
-        # Both are possible; take both paths
-        # XXX os.fork might prove too expensive.  Alternatively, we
-        # could replay our path from the beginning, which would also
-        # let us return symbolic and non-picklable values to concrete
-        # space and implement a counter-example cache.
-        child = os.fork()
-        if child == 0:
-            # True path
-            solver.add(self._v)
-            return True
-        # False path
-        os.waitpid(child, 0)
-        solver.add(z3.Not(self._v))
-        return False
-
-class SList(object):
-    def __init__(self, name, valSort):
-        self._vals = z3.Array(name, z3.IntSort(), valSort)
-        self._len = make_sexpr(z3.Int(name + '.len'))
-        assume(self._len >= 0)
-
-    def __check_idx(self, idx):
-        if idx < 0:
-            raise IndexError("SList index out of range: %r < %r" % (idx, 0))
-        if idx >= self.len():
-            raise IndexError("SList index out of range: %r >= %r" %
-                             (idx, self._len))
-        return toz3(idx)
-
-    def __getitem__(self, idx):
-        return make_sexpr(self._vals[self.__check_idx(idx)])
-
-    def __setitem__(self, idx, val):
-        self._vals = z3.Store(self._vals, self.__check_idx(idx), toz3(val))
-
-    def __eq__(self, o):
-        if not isinstance(o, SList):
-            return NotImplemented
-        return make_sexpr(z3.And(toz3(self._len) == toz3(o._len),
-                                 self._vals == o._vals))
-
-    def __ne__(self, o):
-        r = self == o
-        if r is NotImplemented:
-            return NotImplemented
-        return make_sexpr(z3.Not(toz3(r)))
-
-    def len(self):
-        # Overriding __len__ isn't useful because the len() builtin
-        # will try hard to coerce it to an integer.
-        return self._len
-
-    def append(self, val):
-        l = self.len()
-        self._len += 1
-        self[l] = val
-
-# Why two arrays here?
-# Check the API: z3.Array first;
-# And check the normal implementation of Dict then.
-# The Dict here check the _valid array to see if the key exist and then return the value
-# I am able to understand it here. But feel it is a bad implementation.
-class SDict(object):
-    def __init__(self, name, keySort, valSort):
-        self._map = z3.Array(name, keySort, valSort)
-        self._valid = z3.Array(name + '.valid', keySort, z3.BoolSort())
-
-    def __getitem__(self, key):
-        key = toz3(key)
-        if self._valid[key]:
-            return self._map[key]
-        raise KeyError(key)
-
-    def __setitem__(self, key, val):
-        key, val = toz3(key), toz3(val)
-        self._valid = z3.Store(self._valid, key, True)
-        self._map = z3.Store(self._map, key, val)
-
-    def __eq__(self, o):
-        if not isinstance(o, SDict):
-            return NotImplemented
-        return make_sexpr(z3.And(toz3(self._valid == o._valid),
-                                 toz3(self._map == o._map)))
-
-    def __ne__(self, o):
-        r = self == o
-        if r is NotImplemented:
-            return NotImplemented
-        return make_sexpr(z3.Not(toz3(r)))
-
-# TODO: try to run the code here, figure out:
-# how does %s.choose/someitem.%d work here, which is a usage of z3.(print out the value of choicevar)
-# Every time the API: choose is invoked,
-# the counter adds one, and return the value with index counter
-class SBag(object):
-    def __init__(self, name):
-        self._name_prefix = name
-        self._items = []
-        self._choices = 0
-
-    def add(self, v):
-        self._items.append(v)
-
-    def choose(self):
-        self._choices = self._choices + 1
-        choicevar = anyInt('%s.choose.%d' % (self._name_prefix, self._choices))
-        for i in range(0, len(self._items)):
-            if choicevar == i:
-                return self._items[i]
-
-        ## the bag also contains arbitrary other items
-        newvar = anyInt('%s.someitem.%d' % (self._name_prefix, self._choices))
-        return newvar
-
-    def __eq__(self, o):
-        if not isinstance(o, SBag):
-            return False
-
-        ol = list(o._items)
-        for e1 in self._items:
-            found = False
-            for e2 in ol:
-                if e1 == e2:
-                    ol.remove(e2)
-                    found = True
-                    break
-            if not found:
-                return False
-        return True
-
-    def __ne__(self, o):
-        return not self.__eq__(o)
-
-def make_sexpr(ref):
-    ## handle concrete types
-    if isinstance(ref, bool):
-        return ref
-
-    if isinstance(ref, z3.ArithRef):
-        return SArith(ref)
-    if isinstance(ref, z3.BoolRef):
-        return SBool(ref)
-    return SExpr(ref)
-
-def anyInt(name):
-    return make_sexpr(z3.Int(name))
-
-def anyListOfInt(name):
-    return SList(name, z3.IntSort())
-
-def anyDictOfIntToInt(name):
-    return SDict(name, z3.IntSort(), z3.IntSort())
-
-def assume(e):
-    solver.add(toz3(e))
-    sat = solver.check()
-    if sat == z3.unsat:
-        raise RuntimeError("Unsatisfiable assumption")
-    elif sat != z3.sat:
-        raise RuntimeError("Uncheckable assumption")
-
-def symbolic_apply(fn, *args):
-    # XXX We could avoid this fork if we were smarter about cleaning
-    # up all but the first code path
-    # XXX Return a list of return values of fn.
-    child = os.fork()
-    if child == 0:
-        try:
-            fn(*args)
-        except SystemExit:
-            raise
-        except:
-            import traceback
-            print >>sys.stderr, "Traceback (most recent call last):"
-            etype, value, tb = sys.exc_info()
-            traceback.print_tb(tb)
-            print >>sys.stderr, "  If %s" % \
-                str_state().replace("\n", "\n" + " "*5)
-            lines = traceback.format_exception_only(etype, value)
-            for line in lines:
-                sys.stderr.write(line)
-        sys.exit(0)
-    os.waitpid(child, 0)
-
-
+class PreconditionFailure(Exception):
+    def __init__(self): pass
 
 class Struct(object):
+    __slots__ = []
+
     def __eq__(self, o):
         if self.__class__ != o.__class__:
             return NotImplemented
         # XXX Should this indicate what field is not equal?
-        for field in self.__slots__:
-            if getattr(self, field) != getattr(o, field):
-                return False
-        return True
+        fieldeqs = [getattr(self, field) == getattr(o, field)
+                    for field in self.__slots__]
+        return simsym.symand(fieldeqs)
 
     def __ne__(self, o):
         r = (self == o)
         if r is NotImplemented:
             return NotImplemented
-        return not r
+        return simsym.symnot(r)
 
 class State(Struct):
     __slots__ = ["counter"]
@@ -321,33 +36,35 @@ class State(Struct):
         # XXX This name matters since it connects the initial counter
         # value of different State objects.  Will this scale to more
         # complex state?
-        self.counter = anyInt('State.counter')
-        assume(self.counter >= 0)
+        self.counter = simsym.SInt.any('State.counter')
+        simsym.assume(self.counter >= 0)
 
-    def sys_inc(self):
+    def sys_inc(self, which):
         self.counter = self.counter + 1
 
-    def sys_dec(self):
+    def sys_dec(self, which):
+        if self.counter == 0:
+            raise PreconditionFailure()
         self.counter = self.counter - 1
 
-    def sys_iszero(self):
+    def sys_iszero(self, which):
         return self.counter == 0
 
-# Hold a pointer to read, move forward and return the element pointed to when read.
 class Pipe(Struct):
     __slots__ = ['elems', 'nread']
 
     def __init__(self):
-        self.elems = anyListOfInt('Pipe.elems')
-        self.nread = anyInt('Pipe.nread')
+        self.elems = symtypes.anyListOfInt('Pipe.elems')
+        self.nread = simsym.SInt.any('Pipe.nread')
 
-        assume(self.nread >= 0)
-        assume(self.nread <= self.elems.len())
+        simsym.assume(self.nread >= 0)
+        simsym.assume(self.nread <= self.elems.len())
 
-    def write(self, elem):
+    def write(self, which):
+        elem = simsym.SInt.any('Pipe.write[%s].data' % which)
         self.elems.append(elem)
 
-    def read(self):
+    def read(self, which):
         if self.elems.len() == self.nread:
             return None
         else:
@@ -355,26 +72,21 @@ class Pipe(Struct):
             self.nread = self.nread + 1
             return e
 
-    def write_a(self):
-        self.write(anyInt('Pipe.writeitem.a'))
-
-    def write_b(self):
-        self.write(anyInt('Pipe.writeitem.b'))
-
-class UnordPipe(Struct):
+class UPipe(Struct):
     __slots__ = ['elems', 'nitem']
 
     def __init__(self):
-        self.elems = SBag('UnordPipe.items')
-        self.nitem = anyInt('UnordPipe.nitem')
+        self.elems = symtypes.SBag('UPipe.items')
+        self.nitem = simsym.SInt.any('UPipe.nitem')
 
-        assume(self.nitem >= 0)
+        simsym.assume(self.nitem >= 0)
 
-    def u_write(self, elem):
+    def u_write(self, which):
+        elem = simsym.SInt.any('UPipe.write[%s].data' % which)
         self.elems.add(elem)
         self.nitem = self.nitem + 1
 
-    def u_read(self):
+    def u_read(self, which):
         if self.nitem == 0:
             return None
         else:
@@ -382,48 +94,223 @@ class UnordPipe(Struct):
             self.nitem = self.nitem - 1
             return e
 
-    def u_write_a(self):
-        self.u_write(anyInt('UnordPipe.writeitem.a'))
+class Fs(Struct):
+    __slots__ = ['fn_to_ino', 'ino_to_data', 'numifree']
 
-    def u_write_b(self):
-        self.u_write(anyInt('UnordPipe.writeitem.b'))
+    def __init__(self):
+        self.fn_to_ino = symtypes.anyDictOfIntToInt('Fs.dir')
+        self.ino_to_data = symtypes.anyDictOfIntToInt('Fs.idata')
+        self.numifree = simsym.SInt.any('Fs.numifree')
 
-def test(base, call1, call2):
-    print "%s %s" % (call1.__name__, call2.__name__)
+        simsym.assume(self.numifree >= 0)
+        fn = simsym.unwrap(simsym.SInt.any('fn'))
+        simsym.assume(z3.ForAll(fn,
+                         z3.Implies(self.fn_to_ino._valid[fn],
+                                    self.ino_to_data._valid[self.fn_to_ino._map[fn]])))
 
-    s1 = base()
-    r11 = call1(s1)
-    r12 = call2(s1)
+    def iused(self, ino):
+        fn = simsym.unwrap(simsym.SInt.any('fn'))
+        return simsym.wrap(z3.Exists(fn,
+                              z3.And(self.fn_to_ino._valid[fn],
+                                     self.fn_to_ino._map[fn] == simsym.unwrap(ino))))
 
-    s2 = base()
-    r21 = call2(s2)
-    r22 = call1(s2)
+    def idecref(self, ino):
+        if not self.iused(ino):
+            self.numifree = self.numifree + 1
 
-    if r11 != r22 or r12 != r21:
-        res = "results diverge"
-    elif s1 != s2:
-        res = "state diverges"
-    else:
-        res = "commute"
+    def open(self, which):
+        fn = simsym.SInt.any('Fs.open[%s].fn' % which)
+        creat = simsym.SBool.any('Fs.open[%s].creat' % which)
+        excl = simsym.SBool.any('Fs.open[%s].excl' % which)
+        trunc = simsym.SBool.any('Fs.open[%s].trunc' % which)
+        if creat:
+            if not self.fn_to_ino.contains(fn):
+                if self.numifree == 0:
+                    return ('err', errno.ENOSPC)
+                ino = simsym.SInt.any('Fs.open[%s].ialloc' % which)
+                simsym.add_internal(ino)
+                simsym.assume(simsym.symnot(self.iused(ino)))
+                self.numifree = self.numifree - 1
+                self.ino_to_data[ino] = 0
+                self.fn_to_ino[fn] = ino
+            else:
+                if excl: return ('err', errno.EEXIST)
+        if not self.fn_to_ino.contains(fn):
+            return ('err', errno.ENOENT)
+        if trunc:
+            self.ino_to_data[self.fn_to_ino[fn]] = 0
+        return ('ok',)
 
-    asserts = solver.assertions()
-    if len(asserts) == 0:
-        # XXX What if we have assertions, but they're vacuously true?
-        # XXX Can we filter out explicit assumptions?  I think we're
-        # only interested in the path condition.
-        print "  any state:", res
-    else:
-        print "  %s: %s" % \
-            (str_state().replace("\n", "\n  "), res)
+    def rename(self, which):
+        src = simsym.SInt.any('Fs.rename[%s].src' % which)
+        dst = simsym.SInt.any('Fs.rename[%s].dst' % which)
+        if not self.fn_to_ino.contains(src):
+            return ('err', errno.ENOENT)
+        if self.fn_to_ino.contains(dst):
+            dstino = self.fn_to_ino[dst]
+        else:
+            dstino = None
+        self.fn_to_ino[dst] = self.fn_to_ino[src]
+        del self.fn_to_ino[src]
+        if dstino is not None:
+            self.idecref(dstino)
+        return ('ok',)
+
+    def unlink(self, which):
+        fn = simsym.SInt.any('Fs.unlink[%s].fn' % which)
+        if not self.fn_to_ino.contains(fn):
+            return ('err', errno.ENOENT)
+        ino = self.fn_to_ino[fn]
+        del self.fn_to_ino[fn]
+        self.idecref(ino)
+        return ('ok',)
+
+    def link(self, which):
+        oldfn = simsym.SInt.any('Fs.link[%s].oldfn' % which)
+        newfn = simsym.SInt.any('Fs.link[%s].newfn' % which)
+        if not self.fn_to_ino.contains(oldfn):
+            return ('err', errno.ENOENT)
+        if self.fn_to_ino.contains(newfn):
+            return ('err', errno.EEXIST)
+        self.fn_to_ino[newfn] = self.fn_to_ino[oldfn]
+        return ('ok',)
+
+    def read(self, which):
+        fn = simsym.SInt.any('Fs.read[%s].fn' % which)
+        if not self.fn_to_ino.contains(fn):
+            return ('err', errno.ENOENT)
+        ino = self.fn_to_ino[fn]
+        return ('data', self.ino_to_data[ino])
+
+    def write(self, which):
+        fn = simsym.SInt.any('Fs.write[%s].fn' % which)
+        if not self.fn_to_ino.contains(fn):
+            return ('err', errno.ENOENT)
+        ino = self.fn_to_ino[fn]
+        data = simsym.SInt.any('Fs.write[%s].data' % which)
+        self.ino_to_data[ino] = data
+        return ('ok',)
+
+def test(base, *calls):
+    try:
+        all_s = []
+        all_r = []
+
+        for callseq in itertools.permutations(range(0, len(calls))):
+            s = base()
+            r = {}
+            for idx in callseq:
+                r[idx] = calls[idx](s, chr(idx + ord('a')))
+            all_s.append(s)
+            all_r.append(r)
+
+        diverge = ''
+        if simsym.symor([all_r[0] != r for r in all_r[1:]]):
+            diverge = diverge + 'r'
+        if simsym.symor([all_s[0] != s for s in all_s[1:]]):
+            diverge = diverge + 's'
+        return diverge
+    except PreconditionFailure:
+        return None
+
+def projected_call(pname, pf, method):
+    def wrapped(*args, **kwargs):
+        return pf(method(*args, **kwargs))
+    wrapped.__name__ = '%s:%s' % (method.__name__, pname)
+    return wrapped
+
+def model_unwrap(e):
+    if isinstance(e, z3.FuncDeclRef):
+        return e.name()
+    if isinstance(e, z3.IntNumRef):
+        return int(e.as_long())
+    if isinstance(e, z3.FuncInterp):
+        return [model_unwrap(x) for x in e.as_list()]
+    if isinstance(e, z3.BoolRef):
+        return (str(e) == 'True')
+    if isinstance(e, list):
+        return [model_unwrap(x) for x in e]
+    raise Exception('%s: unknown value type %s' % (e, simsym.strtype(e)))
 
 tests = [
-    (State, [State.sys_inc, State.sys_dec, State.sys_iszero]),
-    (Pipe, [Pipe.write_a, Pipe.write_b, Pipe.read]),
-    (UnordPipe, [UnordPipe.u_write_a, UnordPipe.u_write_b, UnordPipe.u_read]),
+    (State, 3, {},
+     [State.sys_inc, State.sys_dec, State.sys_iszero]),
+    (Pipe,  3, {},
+     [Pipe.write, Pipe.read]),
+    (UPipe, 3, {},
+     [UPipe.u_write, UPipe.u_read]),
+    (Fs,    2, {'first': lambda(x): x[0]},
+     [Fs.open, Fs.read, Fs.write, Fs.unlink, Fs.link, Fs.rename]),
 ]
 
-for (base, calls) in tests:
-    for i in range(len(calls)):
-        for j in range(i, len(calls)):
-            symbolic_apply(test, base, calls[i], calls[j])
+parser = argparse.ArgumentParser()
+parser.add_argument('-c', '--print-conds', action='store_true')
+parser.add_argument('-t', '--test-file')
+args = parser.parse_args()
+
+print_cond = args.print_conds
+testcases = {}
+if args.test_file is None:
+    testfile = None
+else:
+    testfile = open(args.test_file, 'w')
+
+z3printer._PP.max_lines = float('inf')
+for (base, ncomb, projections, calls) in tests:
+    module_testcases = []
+    projected_calls = list(calls)
+    for p in projections:
+        for c in calls:
+            projected_calls.append(projected_call(p, projections[p], c))
+    for callset in itertools.combinations_with_replacement(projected_calls, ncomb):
+        print ' '.join([c.__name__ for c in callset])
+        rvs = simsym.symbolic_apply(test, base, *callset)
+        conds = collections.defaultdict(lambda: simsym.wrap(z3.BoolVal(False)))
+        for cond, res in simsym.combine(rvs):
+            conds[res] = cond
+
+        pc = simsym.simplify(conds[''])
+        pr = simsym.simplify(simsym.symor([conds['r'], conds['rs']]))
+        ps = simsym.simplify(conds['s'])
+
+        ex_pc = simsym.exists(simsym.internals(), pc)
+        nex_pc = simsym.symnot(ex_pc)
+        ex_pr = simsym.exists(simsym.internals(), pr)
+        nex_pr = simsym.symnot(ex_pr)
+        ps2 = simsym.symand([ps, nex_pc, nex_pr])
+
+        ps_ex_pr = simsym.symand([ps, ex_pr])
+        pr2 = simsym.symand([simsym.symor([pr, ps_ex_pr]), nex_pc])
+
+        ps_ex_pc = simsym.symand([ps, ex_pc])
+        pr_ex_pc = simsym.symand([pr, ex_pc])
+        pc2 = simsym.symor([pc, ps_ex_pc, pr_ex_pc])
+
+        for msg, cond in (('commute', pc2),
+                          ('results diverge', pr2),
+                          ('states diverge', ps2)):
+            if simsym.check(cond)[0] == z3.unsat:
+                continue
+            if simsym.check(simsym.symnot(cond))[0] == z3.unsat:
+                s = 'any state'
+            else:
+                if print_cond:
+                    scond = simsym.simplify(cond)
+                    s = '\n    ' + str(scond).replace('\n', '\n    ')
+                else:
+                    s = 'sometimes'
+            print '  %s: %s' % (msg, s)
+
+        if testfile is not None:
+            for cond, ores in rvs:
+                check, model = simsym.check(simsym.symand([cond, pc2]))
+                if check != z3.sat: continue
+
+                vars = {model_unwrap(k): model_unwrap(model[k]) for k in model}
+                testcase = {'calls': [c.__name__ for c in callset],
+                            'vars': vars}
+                module_testcases.append(testcase)
     print
+    testcases[base.__name__] = module_testcases
+
+testfile.write(json.dumps(testcases, indent=2))
