@@ -3,6 +3,8 @@ sys_inc sys_inc
 sys_inc sys_dec
   State.counter >= 0: commute
 sys_inc sys_iszero
+r11:  None ; r22:  None
+r12:  State.counter + 1 == 0 ; r21:  State.counter == 0
   And(State.counter >= 0,
       Not(State.counter == -1) == (State.counter == 0)): results diverge
 sys_inc sys_iszero
@@ -11,6 +13,8 @@ sys_inc sys_iszero
 sys_dec sys_dec
   State.counter >= 0: commute
 sys_dec sys_iszero
+r11:  None ; r22:  None
+r12:  State.counter - 1 == 0 ; r21:  State.counter == 0
   And(State.counter >= 0,
       Not(State.counter == 1) == (State.counter == 0)): results diverge
 sys_dec sys_iszero
@@ -25,6 +29,7 @@ write_a write_a
       Pipe.nread <= Pipe.elems.len): commute
 
 write_a write_b
+s1:  <__main__.Pipe object at 0x7f5b7474caf0> s2,  <__main__.Pipe object at 0x7f5b7474cf50>
   And(Pipe.elems.len >= 0,
       Pipe.nread >= 0,
       Pipe.nread <= Pipe.elems.len,
@@ -55,6 +60,8 @@ write_a write_b
             Pipe.writeitem.a)): commute
 
 write_a read
+r11:  None ; r22:  None
+r12:  Store(Pipe.elems, Pipe.elems.len, Pipe.writeitem.a)[Pipe.nread] ; r21:  None
   And(Pipe.elems.len >= 0,
       Pipe.nread >= 0,
       Pipe.nread <= Pipe.elems.len,
@@ -72,6 +79,8 @@ write_b write_b
       Pipe.nread <= Pipe.elems.len): commute
 
 write_b read
+r11:  None ; r22:  None
+r12:  Store(Pipe.elems, Pipe.elems.len, Pipe.writeitem.b)[Pipe.nread] ; r21:  None
   And(Pipe.elems.len >= 0,
       Pipe.nread >= 0,
       Pipe.nread <= Pipe.elems.len,
@@ -90,6 +99,8 @@ read read
       Pipe.elems.len == Pipe.nread): commute
 
 read read
+r11:  Pipe.elems[Pipe.nread] ; r22:  None
+r12:  None ; r21:  Pipe.elems[Pipe.nread]
   And(Pipe.elems.len >= 0,
       Pipe.nread >= 0,
       Pipe.nread <= Pipe.elems.len,
@@ -97,6 +108,8 @@ read read
       Pipe.elems.len == 1 + Pipe.nread): results diverge
 
 read read
+r11:  Pipe.elems[Pipe.nread] ; r22:  Pipe.elems[Pipe.nread + 1]
+r12:  Pipe.elems[Pipe.nread + 1] ; r21:  Pipe.elems[Pipe.nread]
   And(Pipe.elems.len >= 0,
       Pipe.nread >= 0,
       Pipe.nread <= Pipe.elems.len,
@@ -128,12 +141,20 @@ u_write_a u_write_b
 
 
 u_write_a u_read
+choicevar:  UnordPipe.items.choose.1
+r11:  None ; r22:  None
+r12:  UnordPipe.writeitem.a ; r21:  None
   And(UnordPipe.nitem >= 0,
       UnordPipe.items.choose.1 == 0,
       UnordPipe.nitem == 0): results diverge
 
 
 u_write_a u_read
+choicevar:  UnordPipe.items.choose.1
+choicevar:  UnordPipe.items.choose.1
+newvar:  UnordPipe.items.someitem.1
+r11:  None ; r22:  None
+r12:  UnordPipe.writeitem.a ; r21:  UnordPipe.items.someitem.1
   And(UnordPipe.nitem >= 0,
       UnordPipe.items.choose.1 == 0,
       Not(UnordPipe.nitem == 0),
@@ -141,6 +162,9 @@ u_write_a u_read
 
 
 u_write_a u_read
+choicevar:  UnordPipe.items.choose.1
+choicevar:  UnordPipe.items.choose.1
+newvar:  UnordPipe.items.someitem.1
   And(UnordPipe.nitem >= 0,
       UnordPipe.items.choose.1 == 0,
       Not(UnordPipe.nitem == 0),
@@ -148,12 +172,20 @@ u_write_a u_read
 
 
 u_write_a u_read
+choicevar:  UnordPipe.items.choose.1
+newvar:  UnordPipe.items.someitem.1
+r11:  None ; r22:  None
+r12:  UnordPipe.items.someitem.1 ; r21:  None
   And(UnordPipe.nitem >= 0,
       Not(UnordPipe.items.choose.1 == 0),
       UnordPipe.nitem == 0): results diverge
 
 
 u_write_a u_read
+choicevar:  UnordPipe.items.choose.1
+newvar:  UnordPipe.items.someitem.1
+choicevar:  UnordPipe.items.choose.1
+newvar:  UnordPipe.items.someitem.1
   And(UnordPipe.nitem >= 0,
       Not(UnordPipe.items.choose.1 == 0),
       Not(UnordPipe.nitem == 0)): commute
@@ -164,12 +196,20 @@ u_write_b u_write_b
 
 
 u_write_b u_read
+choicevar:  UnordPipe.items.choose.1
+r11:  None ; r22:  None
+r12:  UnordPipe.writeitem.b ; r21:  None
   And(UnordPipe.nitem >= 0,
       UnordPipe.items.choose.1 == 0,
       UnordPipe.nitem == 0): results diverge
 
 
 u_write_b u_read
+choicevar:  UnordPipe.items.choose.1
+choicevar:  UnordPipe.items.choose.1
+newvar:  UnordPipe.items.someitem.1
+r11:  None ; r22:  None
+r12:  UnordPipe.writeitem.b ; r21:  UnordPipe.items.someitem.1
   And(UnordPipe.nitem >= 0,
       UnordPipe.items.choose.1 == 0,
       Not(UnordPipe.nitem == 0),
@@ -177,6 +217,9 @@ u_write_b u_read
 
 
 u_write_b u_read
+choicevar:  UnordPipe.items.choose.1
+choicevar:  UnordPipe.items.choose.1
+newvar:  UnordPipe.items.someitem.1
   And(UnordPipe.nitem >= 0,
       UnordPipe.items.choose.1 == 0,
       Not(UnordPipe.nitem == 0),
@@ -184,12 +227,20 @@ u_write_b u_read
 
 
 u_write_b u_read
+choicevar:  UnordPipe.items.choose.1
+newvar:  UnordPipe.items.someitem.1
+r11:  None ; r22:  None
+r12:  UnordPipe.items.someitem.1 ; r21:  None
   And(UnordPipe.nitem >= 0,
       Not(UnordPipe.items.choose.1 == 0),
       UnordPipe.nitem == 0): results diverge
 
 
 u_write_b u_read
+choicevar:  UnordPipe.items.choose.1
+newvar:  UnordPipe.items.someitem.1
+choicevar:  UnordPipe.items.choose.1
+newvar:  UnordPipe.items.someitem.1
   And(UnordPipe.nitem >= 0,
       Not(UnordPipe.items.choose.1 == 0),
       Not(UnordPipe.nitem == 0)): commute
@@ -200,12 +251,28 @@ u_read u_read
 
 
 u_read u_read
+choicevar:  UnordPipe.items.choose.1
+newvar:  UnordPipe.items.someitem.1
+choicevar:  UnordPipe.items.choose.1
+newvar:  UnordPipe.items.someitem.1
+r11:  UnordPipe.items.someitem.1 ; r22:  None
+r12:  None ; r21:  UnordPipe.items.someitem.1
   And(UnordPipe.nitem >= 0,
       Not(UnordPipe.nitem == 0),
       UnordPipe.nitem == 1): results diverge
 
 
 u_read u_read
+choicevar:  UnordPipe.items.choose.1
+newvar:  UnordPipe.items.someitem.1
+choicevar:  UnordPipe.items.choose.2
+newvar:  UnordPipe.items.someitem.2
+choicevar:  UnordPipe.items.choose.1
+newvar:  UnordPipe.items.someitem.1
+choicevar:  UnordPipe.items.choose.2
+newvar:  UnordPipe.items.someitem.2
+r11:  UnordPipe.items.someitem.1 ; r22:  UnordPipe.items.someitem.2
+r12:  UnordPipe.items.someitem.2 ; r21:  UnordPipe.items.someitem.1
   And(UnordPipe.nitem >= 0,
       Not(UnordPipe.nitem == 0),
       Not(UnordPipe.nitem == 1),
@@ -214,6 +281,14 @@ u_read u_read
 
 
 u_read u_read
+choicevar:  UnordPipe.items.choose.1
+newvar:  UnordPipe.items.someitem.1
+choicevar:  UnordPipe.items.choose.2
+newvar:  UnordPipe.items.someitem.2
+choicevar:  UnordPipe.items.choose.1
+newvar:  UnordPipe.items.someitem.1
+choicevar:  UnordPipe.items.choose.2
+newvar:  UnordPipe.items.someitem.2
   And(UnordPipe.nitem >= 0,
       Not(UnordPipe.nitem == 0),
       Not(UnordPipe.nitem == 1),
