@@ -28,7 +28,7 @@
         name, ctx = None )
 ```
 
-# Symbolic Execution
-果然之前的疑问是我的理解有问题。  
-SE执行的过程中，实际上有两次添加约束的过程：实际的两次call和之后进行state比较的时候。  
-那么choose的实现也就可以理解了，确实choicevar没有被赋予确定的值，但是在之后的循环里增加了与其相关的约束，在一次写一次读的测试中，i最大为1，当然所有的值都是零了。
+> Return an integer constant named `name`. If `ctx=None`, then the global context is used.
+
+如果只有一次入队和出队的话，这样是没有问题的，因为这两次的index都是0。但是我不理解除了这样两次写入commute之外有什么实际的意义，因为读出的时候依然是有顺序的，事实上写入顺序会造成读出结果的不同。
+> 这个需要看看他之后是怎么样具体使用这个“unordered pipe”了。
