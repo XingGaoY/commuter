@@ -29,6 +29,20 @@ FS的state有两个，```fn_to_ino```与```ino_to_data```，其中第一个表�
 
         return True
 ```
+检查重命名文件是否存在，存在则进一步检查目标文件名是否存在，存在则将其从inode列表中移除（这里的操作明显不完备，还应该将两个```SDict```中的数据修改才对），然后将原文件名修改为新文件名。
+```
+    def rename(self, which):
+        src = simsym.anyInt('Fs.rename.src.%s' % which)
+        dst = simsym.anyInt('Fs.rename.dst.%s' % which)
+        if not self.fn_to_ino.contains(src):
+            return ('err', errno.ENOENT)
+        if self.fn_to_ino.contains(dst):
+            self.ialloc[self.fn_to_ino[dst]] = False
+            self.numialloc = self.numialloc - 1
+        self.fn_to_ino[dst] = self.fn_to_ino[src]
+        del self.fn_to_ino[src]
+        return ('ok',)
+```
 这个函数没有做任何的检查，直接在```SDict._valid```队列中将对应的值置为false。
 ```
     def unlink(self, which):
