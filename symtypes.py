@@ -42,8 +42,7 @@ class SList(object):
         l = self.len()
         self._len += 1
         self[l] = val
-# Here I could give the answer: the value is not removed but just set the validation value false
-# But whether it is unable to remove?
+
 class SDict(object):
     def __init__(self, name, keySort, valSort):
         self._map = z3.Array(name, keySort, valSort)
@@ -91,14 +90,13 @@ class SBag(object):
 
     def choose(self):
         self._choices = self._choices + 1
-        choicevar = SInt.any('%s.choose.%d' % (self._name_prefix, self._choices))
-        add_internal(choicevar)
+        choicevar = anyInt('%s.choose.%d' % (self._name_prefix, self._choices))
         for i in range(0, len(self._items)):
             if choicevar == i:
                 return self._items[i]
 
         # The bag also contains arbitrary other items
-        newvar = SInt.any('%s.someitem.%d' % (self._name_prefix, self._choices))
+        newvar = anyInt('%s.someitem.%d' % (self._name_prefix, self._choices))
         return newvar
 
     def __eq__(self, o):
@@ -128,3 +126,4 @@ def anyListOfBool(name):
 
 def anyDictOfIntToInt(name):
     return SDict(name, z3.IntSort(), z3.IntSort())
+

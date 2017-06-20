@@ -18,38 +18,9 @@ def z3_nonzero(self):
 z3.ExprRef.__nonzero__ = z3_nonzero
 del z3_nonzero
 
-# Check the usage of @classmethod, cls
 class Symbolic(object):
-    """Root of the symbolic type wrapper hierarchy.  Subclasses must
-    provide a _z3_ref_type class field giving the Z3 ref type wrapped
-    by instances of the subclass."""
-
-    def __init__(self):
-        raise RuntimeError("%s cannot be constructed directly" % strtype(self))
-
-    @classmethod
-    def _wrap(cls, z3ref):
-        """Construct an instance of 'cls' wrapping the given Z3 ref
-        object."""
-        if not isinstance(z3ref, cls._z3_ref_type):
-            raise TypeError("%s expected %s, got %s" %
-                            (cls.__name__, cls._z3_ref_type.__name__,
-                             strtype(z3ref)))
-        obj = cls.__new__(cls)
-        obj._v = z3ref
-        return obj
-
-class SymbolicVal(object):
-    """A symbolic value with a specific type (or "sort" in z3
-    terminology).  A subclass of SymbolicVal must have a _z3_sort
-    class field giving the z3.SortRef for the value's type."""
-
-    @classmethod
-    def any(cls, name):
-        """Return a symbolic constant of unknown value."""
-        # Const returns the most specific z3.*Ref type it can based on
-        # the sort.
-        return cls._wrap(z3.Const(name, cls._z3_sort))
+    """Root of the symbolic type wrapper hierarchy."""
+    pass
 
 class MetaZ3Wrapper(type):
     """Metaclass to generate wrappers for Z3 ref methods.  The class
@@ -77,14 +48,21 @@ class MetaZ3Wrapper(type):
         return type.__new__(cls, classname, bases, classdict)
 
 class SExpr(Symbolic):
-    _z3_ref_type = z3.ExprRef
-
     __metaclass__ = MetaZ3Wrapper
+
+    def __init__(self, ref):
+        if not isinstance(ref, z3.ExprRef):
+            raise TypeError("SExpr expected ExprRef, got %s" % strtype(ref))
+        self._v = ref
+
     __wrap__ = {("wrap", 2): ["__eq__", "__ne__"],
                 (None, 1): ["__str__", "__repr__"]}
 
 class SArith(SExpr):
-    _z3_ref_type = z3.ArithRef
+    def __init__(self, ref):
+        if not isinstance(ref, z3.ArithRef):
+            raise TypeError("SArith expected ArithRef, got %s" % strtype(ref))
+        super(SArith, self).__init__(ref)
 
     __wrap__ = {("wrap", 2):
                     ["__add__", "__div__", "__mod__", "__mul__", "__pow__",
@@ -95,29 +73,23 @@ class SArith(SExpr):
                 ("wrap", 1):
                     ["__neg__", "__pos__"]}
 
-class SInt(SArith, SymbolicVal):
-    _z3_sort = z3.IntSort()
-
-class SBool(SExpr, SymbolicVal):
-    _z3_ref_type = z3.BoolRef
-    _z3_sort = z3.BoolSort()
+class SBool(SExpr):
+    def __init__(self, ref):
+        if not isinstance(ref, z3.BoolRef):
+            raise TypeError("SBool expected BoolRef, got %s" % strtype(ref))
+        super(SBool, self).__init__(ref)
 
     def __nonzero__(self):
         solver = get_solver()
         solver.push()
         solver.add(self._v)
-        c = solver.check()
-        if c == z3.unknown:
-            raise RuntimeError('Undecidable constraints')
-        canTrue = (c == z3.sat)
+        # XXX What about z3.unknown?
+        canTrue = (solver.check() == z3.sat)
         solver.pop()
 
         solver.push()
         solver.add(z3.Not(self._v))
-        c = solver.check()
-        if c == z3.unknown:
-            raise RuntimeError('Undecidable constraints')
-        canFalse = (c == z3.sat)
+        canFalse = (solver.check() == z3.sat)
         solver.pop()
 
         if canTrue and not canFalse:
@@ -126,96 +98,34 @@ class SBool(SExpr, SymbolicVal):
             return False
         if not canTrue and not canFalse:
             raise RuntimeError("Branch contradiction")
-        # Go back to see the usage of the codes
+
         # Both are possible; take both paths
-        global cursched
-        global curschedidx
-        if len(cursched) == curschedidx:
-            newsched = list(cursched)
-            cursched.append(True)
-            newsched.append(False)
-            queue_schedule(newsched)
-
-        rv = cursched[curschedidx]
-        if rv == True:
+        # XXX os.fork might prove too expensive.  Alternatively, we
+        # could replay our path from the beginning, which would also
+        # let us return symbolic and non-picklable values to concrete
+        # space and implement a counter-example cache.
+        sys.stdout.flush()
+        child = os.fork()
+        if child == 0:
+            # True path
             solver.add(self._v)
-        else:
-            solver.add(z3.Not(self._v))
-        curschedidx = curschedidx + 1
-        return rv
-
-class SEnumBase(SExpr):
-    _z3_ref_type = z3.DatatypeRef
-
-def tenum(name, vals):
-    """Return an enumeration type called 'name' with the given values.
-    'vals' must be a list of strings or a string of space-separated
-    names.  The returned type will have a class field for each value.
-    Instantiating the resulting type will return a symbolic enum that
-    can take on any of the enumerated values."""
-
-    if isinstance(vals, basestring):
-        vals = vals.split()
-    sort, consts = z3.EnumSort(name, vals)
-    fields = dict(zip(vals, consts))
-    fields["_z3_sort"] = sort
-    return type(name, (SEnumBase, SymbolicVal), fields)
-
-class STupleBase(SExpr):
-    _z3_ref_type = z3.DatatypeRef
-
-def ttuple(name, *types):
-    """Return a named tuple type with the given fields.  Each 'type'
-    argument must be a pair of name and type."""
-
-    sort = z3.Datatype(name)
-    sort.declare(name, *[(fname, typ._z3_sort) for fname, typ in types])
-    sort = sort.create()
-    fields = {"_z3_sort" : sort}
-    for fname, typ in types:
-        code = """\
-@property
-def %s(self):
-    return wrap(self._z3_sort.%s(self._v))""" % (fname, fname)
-        locals_dict = {}
-        exec code in globals(), locals_dict
-        fields[fname] = locals_dict[fname]
-    return type(name, (STupleBase, SymbolicVal), fields)
+            return True
+        # False path
+        os.waitpid(child, 0)
+        solver.add(z3.Not(self._v))
+        return False
 
 #
 # Constructors
 #
 
-def symand(exprlist):
-    if any([isinstance(x, Symbolic) for x in exprlist]):
-        return wrap(z3.And(*[unwrap(x) for x in exprlist]))
-    else:
-        return all(exprlist)
+def anyBool(name):
+    """Return a symbolic value that can be True or False."""
+    return wrap(z3.Bool(name))
 
-def symor(exprlist):
-    if any([isinstance(x, Symbolic) for x in exprlist]):
-        return wrap(z3.Or(*[unwrap(x) for x in exprlist]))
-    else:
-        return any(exprlist)
-
-def symnot(e):
-    if isinstance(e, Symbolic):
-        return wrap(z3.Not(unwrap(e)))
-    else:
-        return not e
-
-def symeq(a, b):
-    if isinstance(a, tuple) and isinstance(b, tuple):
-        if len(a) != len(b):
-            return False
-        return symand([symeq(aa, bb) for (aa, bb) in zip(a, b)])
-    return a == b
-
-def exists(vars, e):
-    return wrap(z3.Exists([unwrap(v) for v in vars], unwrap(e)))
-
-def forall(vars, e):
-    return wrap(z3.ForAll([unwrap(v) for v in vars], unwrap(e)))
+def anyInt(name):
+    """Return a symbolic value that can be any integer."""
+    return wrap(z3.Int(name))
 
 #
 # Conversions to Z3 types and wrapper types
@@ -246,10 +156,10 @@ def wrap(ref):
         raise TypeError("Not a bool, int, long, float, or z3.ExprRef")
 
     if isinstance(ref, z3.ArithRef):
-        return SArith._wrap(ref)
+        return SArith(ref)
     if isinstance(ref, z3.BoolRef):
-        return SBool._wrap(ref)
-    return SExpr._wrap(ref)
+        return SBool(ref)
+    return SExpr(ref)
 
 #
 # AST matching code.  Unused because the simplifier aggressively
@@ -292,10 +202,7 @@ def ast_cleanup(a):
 #
 
 solver = None
-assumptions = None
-schedq = []
-cursched = None
-curschedidx = None
+assumptions = []
 
 def get_solver():
     """Return the current z3.Solver(), or raise RuntimeError if no
@@ -304,47 +211,29 @@ def get_solver():
         raise RuntimeError("Symbolic execution attempted outside symbolic_apply")
     return solver
 
-def queue_schedule(s):
-    # print "currently in schedule", cursched
-    # print "queueing schedule", s
-    schedq.append(s)
-
 def str_state():
     """Return the current path constraint as a string, or None if the
     path is unconstrained."""
 
     asserts = get_solver().assertions()
+    asserts = [a for a in asserts if not any(a.eq(u) for u in assumptions)]
     if len(asserts) == 0:
         return None
-    return str(z3.simplify(z3.And(*asserts),
-                           expand_select_store=True))
-
-def simplify(expr):
-    t = z3.Repeat(z3.Then('propagate-values',
-                          'ctx-solver-simplify',
-                          z3.With('simplify', expand_select_store=True)))
-    subgoals = t(unwrap(expr))
-    if len(subgoals[0]) == 0:
-        s = wrap(z3.BoolVal(True))
-    else:
-        s = wrap(z3.simplify(z3.And(*[z3.And(*g) for g in subgoals])))
-    return s
+    return str(z3.simplify(z3.And(*asserts)))
 
 def require(e):
     """Declare symbolic expression e to be True."""
 
     if e is True:
         return
-    if any(unwrap(e).eq(a) for a in assumptions):
-        return
 
     solver = get_solver()
     solver.add(unwrap(e))
     sat = solver.check()
     if sat == z3.unsat:
-        raise RuntimeError("Unsatisfiable assumption %s" % e)
+        raise RuntimeError("Unsatisfiable assumption")
     elif sat != z3.sat:
-        raise RuntimeError("Uncheckable assumption %s" % e)
+        raise RuntimeError("Uncheckable assumption")
 
 def assume(e):
     require(e)
@@ -354,90 +243,31 @@ def symbolic_apply(fn, *args):
     """Evaluate fn(*args) under symbolic execution.  The return value
     of fn is ignored because it may have many return values."""
 
-    rvs = []
-    queue_schedule([])
-
-    global schedq
-    while len(schedq) > 0:
-        global cursched
-        cursched = schedq.pop()
-
-        global curschedidx
-        curschedidx = 0
-
+    # XXX We could avoid this fork if we were smarter about cleaning
+    # up all but the first code path
+    # XXX Return a list of return values of fn.
+    sys.stdout.flush()
+    child = os.fork()
+    if child == 0:
         global solver
-        global assumptions
         solver = z3.Solver()
-        assumptions = []
         try:
-            rv = fn(*args)
-            condlist = [a for a in solver.assertions()
-                        if not any(a.eq(u) for u in assumptions)]
-            cond = wrap(z3.And(*([z3.BoolVal(True)] + condlist)))
-            rvs.append((cond, rv))
-        except Exception as e:
-            if len(e.args) == 1:
-                e.args = ('%s in symbolic state:\n%s' % (e.args[0], str_state()),)
-            else:
-                e.args = e.args + (str_state(),)
+            fn(*args)
+        except SystemExit:
             raise
-        finally:
-            solver = None
-            assumptions = None
-    return rvs
-
-def combine(rvs):
-    """Given a set of return values from symbolic_apply, combine
-    the conditions for identical return values."""
-
-    combined = []
-    used = [False] * len(rvs)
-    for idx, (cond, rv) in enumerate(rvs):
-        if used[idx]:
-            continue
-        used[idx] = True
-        for idx2, (cond2, rv2) in enumerate(rvs):
-            if used[idx2]:
-                continue
-            solver = z3.Solver()
-            e = symnot(symeq(rv, rv2))
-            solver.add(unwrap(e))
-            c = solver.check()
-            if c == z3.unsat:
-                used[idx2] = True
-                cond = wrap(z3.Or(unwrap(cond), unwrap(cond2)))
-        combined.append((cond, rv))
-    return combined
-
-def check(e):
-    global solver
-    clearsolver = False
-    if solver is None:
-        solver = z3.Solver()
-        clearsolver = True
-    solver.push()
-    solver.add(unwrap(e))
-    c = solver.check()
-    if c == z3.sat:
-        m = solver.model()
-    else:
-        m = None
-    solver.pop()
-    if clearsolver:
-        solver = None
-    return (c, m)
-
-#
-# Helpers for tracking "internal" variables
-#
-
-internal_vars = {None: SInt.any('__dummy')}
-
-def add_internal(v):
-    internal_vars[str(v)] = v
-
-def internals():
-    return [v for _, v in internal_vars.iteritems()]
+        except:
+            import traceback
+            print >>sys.stderr, "Traceback (most recent call last):"
+            etype, value, tb = sys.exc_info()
+            traceback.print_tb(tb)
+            state = str_state()
+            if state is not None:
+                print >>sys.stderr, "  If %s" % state.replace("\n", "\n" + " "*5)
+            lines = traceback.format_exception_only(etype, value)
+            for line in lines:
+                sys.stderr.write(line)
+        sys.exit(0)
+    os.waitpid(child, 0)
 
 #
 # Utilities
@@ -448,3 +278,4 @@ def strtype(x):
         return x.__class__.__name__
     else:
         return type(x).__name__
+
