@@ -9,3 +9,14 @@ to raise PreconditionFailure: e.g., a blocking pipe read would not have
 returned so early in a normal execution.  We can then reason separately
 about blocking and non-blocking pipe reads.
 
+##2017.6.20
+- z3
+	- z3py.ForAll: the same meaning as "For any" in math
+	- z3py.Implies: the symbol "->" in concrete math, which is also an inference in propositional logic. I forgot it, as seldom use it.
+
+- Need to understand the codes in FS._init_ with ```ialloc``` and ```numialloc``` even though they are abandoned shortly.
+	- ```ialloc``` and ```numialloc``` are two two dicts to record the free inodes
+
+- Run the codes in Nov. 25, 2012.
+	- The log and the statements are hard to analysis from here. And it's also needless to read. I just need to check the implementation of the syscalls and their states.
+	- I couldn't understand the term of form ```store(A, I, v)[j]```, even I know what it expands to ```if-then-else``` form. Check the API later and the [stackoverflow](https://stackoverflow.com/questions/15593302/simplifying-non-boolean-expressions-in-z3-assuming-a-set-of-axioms)
