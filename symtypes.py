@@ -90,13 +90,14 @@ class SBag(object):
 
     def choose(self):
         self._choices = self._choices + 1
-        choicevar = anyInt('%s.choose.%d' % (self._name_prefix, self._choices))
+        choicevar = SInt.any('%s.choose.%d' % (self._name_prefix, self._choices))
+        add_internal(choicevar)
         for i in range(0, len(self._items)):
             if choicevar == i:
                 return self._items[i]
 
         # The bag also contains arbitrary other items
-        newvar = anyInt('%s.someitem.%d' % (self._name_prefix, self._choices))
+        newvar = SInt.any('%s.someitem.%d' % (self._name_prefix, self._choices))
         return newvar
 
     def __eq__(self, o):
@@ -126,4 +127,3 @@ def anyListOfBool(name):
 
 def anyDictOfIntToInt(name):
     return SDict(name, z3.IntSort(), z3.IntSort())
-

@@ -268,8 +268,10 @@ for (base, ncomb, projections, calls) in tests:
         ps = simsym.simplify(conds['s'])
 
         ex_pc = simsym.exists(simsym.internals(), pc)
+        #print simsym.internals()
+        print "pc:", pc
+        print "ex_pc:", ex_pc
         nex_pc = simsym.symnot(ex_pc)
-        print "nex_pc", nex_pc
         ex_pr = simsym.exists(simsym.internals(), pr)
         nex_pr = simsym.symnot(ex_pr)
         ps2 = simsym.symand([ps, nex_pc, nex_pr])
