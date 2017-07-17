@@ -9,9 +9,3 @@ to raise PreconditionFailure: e.g., a blocking pipe read would not have
 returned so early in a normal execution.  We can then reason separately
 about blocking and non-blocking pipe reads.
 
----
-
-close*close test cases: two close's of a pipe writer end don't scale on
-xv6, but we don't generate this test case because our path condition
-does not involve Fd.ispipe, and Z3's model gives testgen a "false"
-via default interpretation.

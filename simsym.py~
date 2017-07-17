@@ -419,7 +419,6 @@ def check(e):
     c = solver.check()
     if c == z3.sat:
         m = solver.model()
-	print "model:", m
     else:
         m = None
     solver.pop()
